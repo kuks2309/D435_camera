@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Intel RealSense D435 Camera Image Capture Script
-This script captures RGB and Depth images from the D435 camera.
+This script captures RGB images from the D435 camera.
 """
 
 import pyrealsense2 as rs
@@ -31,15 +31,16 @@ class D435Camera:
 
         # Configure streams
         self.config.enable_stream(rs.stream.color, width, height, rs.format.bgr8, fps)
-        self.config.enable_stream(rs.stream.depth, width, height, rs.format.z16, fps)
-
-        # Align depth to color
-        self.align = rs.align(rs.stream.color)
 
     def start(self):
         """Start the camera pipeline"""
         print("Starting RealSense D435 camera...")
-        self.pipeline.start(self.config)
+        profile = self.pipeline.start(self.config)
+
+        # Get device information
+        device = profile.get_device()
+        self.serial_number = device.get_info(rs.camera_info.serial_number)
+        print(f"Camera Serial Number: {self.serial_number}")
 
         # Wait for auto-exposure to stabilize
         print("Waiting for camera to stabilize...")
@@ -54,37 +55,24 @@ class D435Camera:
 
     def get_frames(self):
         """
-        Capture and return aligned RGB and Depth frames
+        Capture and return RGB frame
 
         Returns:
             color_image: numpy array of RGB image
-            depth_image: numpy array of depth image
-            depth_colormap: numpy array of colorized depth image for visualization
         """
         # Wait for frames
         frames = self.pipeline.wait_for_frames()
 
-        # Align depth to color
-        aligned_frames = self.align.process(frames)
+        # Get color frame
+        color_frame = frames.get_color_frame()
 
-        # Get aligned frames
-        color_frame = aligned_frames.get_color_frame()
-        depth_frame = aligned_frames.get_depth_frame()
+        if not color_frame:
+            return None
 
-        if not color_frame or not depth_frame:
-            return None, None, None
-
-        # Convert to numpy arrays
+        # Convert to numpy array
         color_image = np.asanyarray(color_frame.get_data())
-        depth_image = np.asanyarray(depth_frame.get_data())
 
-        # Create colorized depth image for visualization
-        depth_colormap = cv2.applyColorMap(
-            cv2.convertScaleAbs(depth_image, alpha=0.03),
-            cv2.COLORMAP_JET
-        )
-
-        return color_image, depth_image, depth_colormap
+        return color_image
 
     def get_intrinsics(self):
         """Get camera intrinsics"""
@@ -103,14 +91,19 @@ class D435Camera:
             'coeffs': intrinsics.coeffs
         }
 
+    def get_device_info(self):
+        """Get camera device information"""
+        return {
+            'serial_number': self.serial_number
+        }
 
-def save_images(color_image, depth_image, base_dir='captured_images'):
+
+def save_images(color_image, base_dir='captured_images'):
     """
     Save captured images to disk
 
     Args:
         color_image: RGB image
-        depth_image: Depth image
         base_dir: Base directory path
     """
     # Get current date and time
@@ -126,13 +119,9 @@ def save_images(color_image, depth_image, base_dir='captured_images'):
     color_path = os.path.join(output_dir, f'color_{time_filename}.png')
     cv2.imwrite(color_path, color_image)
 
-    # Save depth image (as 16-bit PNG) with time-based filename
-    depth_path = os.path.join(output_dir, f'depth_{time_filename}.png')
-    cv2.imwrite(depth_path, depth_image)
+    print(f"Saved: {color_path}")
 
-    print(f"Saved: {color_path} and {depth_path}")
-
-    return color_path, depth_path
+    return color_path
 
 
 def main():
@@ -159,29 +148,27 @@ def main():
 
         while True:
             # Get frames
-            color_image, depth_image, depth_colormap = camera.get_frames()
+            color_image = camera.get_frames()
 
             if color_image is None:
                 continue
 
-            # Create side-by-side display
-            display = np.hstack((color_image, depth_colormap))
-
             # Add text overlay
+            display = color_image.copy()
             cv2.putText(display, f"Captured: {capture_count}", (10, 30),
                        cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             cv2.putText(display, "Press 'c' to capture, 'q' to quit", (10, 60),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
             # Display
-            cv2.imshow('RealSense D435 - Color | Depth', display)
+            cv2.imshow('RealSense D435 - Color', display)
 
             # Handle key press
             key = cv2.waitKey(1) & 0xFF
 
             # Capture image
             if key == ord('c') or key == ord(' '):
-                save_images(color_image, depth_image)
+                save_images(color_image)
                 capture_count += 1
 
             # Quit
