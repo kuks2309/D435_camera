@@ -14,21 +14,84 @@ import sys
 
 class D435ArUcoDetector:
     def __init__(self, calibration_file='ds435_calibration_data.json',
-                 aruco_dict_type=aruco.DICT_4X4_50, marker_size=0.05):
+                 aruco_dict_type=aruco.DICT_APRILTAG_36h11, marker_size=0.02):
         """
-        Initialize D435 ArUco Detector
+        Initialize D435 ArUco/AprilTag Detector
 
         Args:
             calibration_file: Path to calibration JSON file
-            aruco_dict_type: ArUco dictionary type (default: DICT_4X4_50)
-            marker_size: Physical size of marker in meters (default: 0.05m = 5cm)
+            aruco_dict_type: ArUco/AprilTag dictionary type (default: DICT_APRILTAG_36h11)
+            marker_size: Physical size of marker in meters (default: 0.02m = 20mm)
         """
         # Load calibration data
         self.load_calibration(calibration_file)
 
-        # ArUco detector parameters
-        self.aruco_dict = aruco.getPredefinedDictionary(aruco_dict_type)
-        self.aruco_params = aruco.DetectorParameters_create()
+        # Check if using AprilTag
+        self.is_apriltag = 'APRILTAG' in str(aruco_dict_type)
+
+        # ArUco detector parameters (using modern OpenCV API)
+        self.aruco_dict = cv2.aruco.getPredefinedDictionary(aruco_dict_type)
+
+        # Try using new API (OpenCV 4.7+), fallback to legacy API
+        try:
+            # Modern API
+            self.detector = aruco.ArucoDetector(self.aruco_dict)
+
+            # Optimize detection parameters (more permissive for small markers)
+            params = aruco.DetectorParameters()
+            params.adaptiveThreshWinSizeMin = 3
+            params.adaptiveThreshWinSizeMax = 23
+            params.adaptiveThreshWinSizeStep = 10
+            params.adaptiveThreshConstant = 7
+            params.minMarkerPerimeterRate = 0.01  # Lower = detect smaller markers
+            params.maxMarkerPerimeterRate = 4.0
+            params.polygonalApproxAccuracyRate = 0.05  # Higher = more permissive
+            params.minCornerDistanceRate = 0.01  # Lower = more permissive
+            params.minDistanceToBorder = 1  # Lower = detect markers near edges
+            params.minMarkerDistanceRate = 0.01  # Allow close markers
+            # Use AprilTag corner refinement if using AprilTag dictionary
+            if self.is_apriltag:
+                params.cornerRefinementMethod = aruco.CORNER_REFINE_APRILTAG
+            else:
+                params.cornerRefinementMethod = aruco.CORNER_REFINE_SUBPIX
+            params.cornerRefinementWinSize = 5
+            params.cornerRefinementMaxIterations = 30
+            params.cornerRefinementMinAccuracy = 0.1
+            params.markerBorderBits = 1  # For 6x6 markers
+            params.minOtsuStdDev = 5.0  # Lower = more permissive thresholding
+            params.perspectiveRemovePixelPerCell = 4
+            params.perspectiveRemoveIgnoredMarginPerCell = 0.13
+            self.detector.setDetectorParameters(params)
+            self.use_new_api = True
+            print("Using new OpenCV ArUco API (4.7+)")
+        except AttributeError:
+            # Legacy API for older OpenCV versions (more permissive settings)
+            self.aruco_params = aruco.DetectorParameters_create()
+            self.aruco_params.adaptiveThreshWinSizeMin = 3
+            self.aruco_params.adaptiveThreshWinSizeMax = 23
+            self.aruco_params.adaptiveThreshWinSizeStep = 10
+            self.aruco_params.adaptiveThreshConstant = 7
+            self.aruco_params.minMarkerPerimeterRate = 0.01  # Lower = more permissive
+            self.aruco_params.maxMarkerPerimeterRate = 4.0
+            self.aruco_params.polygonalApproxAccuracyRate = 0.05  # Higher = more permissive
+            self.aruco_params.minCornerDistanceRate = 0.01  # Lower = more permissive
+            self.aruco_params.minDistanceToBorder = 1  # Lower = detect near edges
+            self.aruco_params.minMarkerDistanceRate = 0.01
+            # Use AprilTag corner refinement if using AprilTag dictionary
+            if self.is_apriltag:
+                self.aruco_params.cornerRefinementMethod = aruco.CORNER_REFINE_APRILTAG
+            else:
+                self.aruco_params.cornerRefinementMethod = aruco.CORNER_REFINE_SUBPIX
+            self.aruco_params.cornerRefinementWinSize = 5
+            self.aruco_params.cornerRefinementMaxIterations = 30
+            self.aruco_params.cornerRefinementMinAccuracy = 0.1
+            self.aruco_params.markerBorderBits = 1  # For 6x6 markers
+            self.aruco_params.minOtsuStdDev = 5.0
+            self.aruco_params.perspectiveRemovePixelPerCell = 4
+            self.aruco_params.perspectiveRemoveIgnoredMarginPerCell = 0.13
+            self.use_new_api = False
+            print("Using legacy OpenCV ArUco API")
+
         self.marker_size = marker_size
 
         # Create pipeline
@@ -137,12 +200,13 @@ class D435ArUcoDetector:
 
         return color_image
 
-    def detect_markers(self, image):
+    def detect_markers(self, image, debug=False):
         """
         Detect ArUco markers in the image
 
         Args:
             image: Input image
+            debug: If True, show debug information
 
         Returns:
             corners: Detected marker corners
@@ -152,12 +216,31 @@ class D435ArUcoDetector:
         # Convert to grayscale
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-        # Detect markers (using legacy API for older OpenCV versions)
-        corners, ids, rejected = aruco.detectMarkers(
-            gray,
-            self.aruco_dict,
-            parameters=self.aruco_params
-        )
+        # Apply histogram equalization for better contrast
+        gray = cv2.equalizeHist(gray)
+
+        # Optional: Apply bilateral filter to reduce noise while preserving edges
+        # gray = cv2.bilateralFilter(gray, 9, 75, 75)
+
+        # Detect markers using appropriate API
+        if self.use_new_api:
+            # Modern API (OpenCV 4.7+)
+            corners, ids, rejected = self.detector.detectMarkers(gray)
+        else:
+            # Legacy API
+            corners, ids, rejected = aruco.detectMarkers(
+                gray,
+                self.aruco_dict,
+                parameters=self.aruco_params
+            )
+
+        # Debug information
+        if debug:
+            print(f"\n[DEBUG] Detection results:")
+            print(f"  Detected markers: {len(ids) if ids is not None else 0}")
+            print(f"  Rejected candidates: {len(rejected)}")
+            if ids is not None:
+                print(f"  Marker IDs: {ids.flatten()}")
 
         return corners, ids, rejected
 
@@ -287,25 +370,127 @@ class D435ArUcoDetector:
 
 def main():
     """Main function for ArUco marker detection"""
+    import argparse
+
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='D435 ArUco/AprilTag Marker Detection')
+    parser.add_argument('--dict', type=str, default=None,
+                       choices=['DICT_4X4_50', 'DICT_5X5_100', 'DICT_6X6_250',
+                               'DICT_7X7_50', 'DICT_ARUCO_ORIGINAL',
+                               'DICT_APRILTAG_16h5', 'DICT_APRILTAG_25h9',
+                               'DICT_APRILTAG_36h10', 'DICT_APRILTAG_36h11'],
+                       help='ArUco/AprilTag dictionary type (if not specified, will ask interactively)')
+    parser.add_argument('--size', type=float, default=None,
+                       help='Marker size in meters (if not specified, will ask interactively)')
+    parser.add_argument('--debug', action='store_true',
+                       help='Show debug information')
+    parser.add_argument('--no-interactive', action='store_true',
+                       help='Skip interactive selection (use defaults)')
+
+    args = parser.parse_args()
+
+    # Get dictionary type
+    dict_mapping = {
+        'DICT_4X4_50': aruco.DICT_4X4_50,
+        'DICT_5X5_100': aruco.DICT_5X5_100,
+        'DICT_6X6_250': aruco.DICT_6X6_250,
+        'DICT_7X7_50': aruco.DICT_7X7_50,
+        'DICT_ARUCO_ORIGINAL': aruco.DICT_ARUCO_ORIGINAL,
+        'DICT_APRILTAG_16h5': aruco.DICT_APRILTAG_16h5,
+        'DICT_APRILTAG_25h9': aruco.DICT_APRILTAG_25h9,
+        'DICT_APRILTAG_36h10': aruco.DICT_APRILTAG_36h10,
+        'DICT_APRILTAG_36h11': aruco.DICT_APRILTAG_36h11,
+    }
+
+    # Interactive selection if not specified via command line
+    if args.dict is None and not args.no_interactive:
+        print("="*60)
+        print("D435 ArUco/AprilTag Marker Detection")
+        print("="*60)
+        print("\nSelect marker type:")
+        print("\n[AprilTag]")
+        print("  1. DICT_APRILTAG_36h11  (recommended for AprilTag)")
+        print("  2. DICT_APRILTAG_16h5")
+        print("  3. DICT_APRILTAG_25h9")
+        print("  4. DICT_APRILTAG_36h10")
+        print("\n[ArUco]")
+        print("  5. DICT_6X6_250  (recommended for ArUco)")
+        print("  6. DICT_4X4_50")
+        print("  7. DICT_5X5_100")
+        print("  8. DICT_7X7_50")
+        print("  9. DICT_ARUCO_ORIGINAL")
+
+        choice = input("\nEnter choice (1-9) [default: 1]: ").strip()
+
+        choice_map = {
+            '1': 'DICT_APRILTAG_36h11',
+            '2': 'DICT_APRILTAG_16h5',
+            '3': 'DICT_APRILTAG_25h9',
+            '4': 'DICT_APRILTAG_36h10',
+            '5': 'DICT_6X6_250',
+            '6': 'DICT_4X4_50',
+            '7': 'DICT_5X5_100',
+            '8': 'DICT_7X7_50',
+            '9': 'DICT_ARUCO_ORIGINAL',
+        }
+
+        if choice == '':
+            choice = '1'
+
+        if choice in choice_map:
+            args.dict = choice_map[choice]
+        else:
+            print(f"Invalid choice. Using default: DICT_APRILTAG_36h11")
+            args.dict = 'DICT_APRILTAG_36h11'
+    elif args.dict is None:
+        # Use default if --no-interactive is specified
+        args.dict = 'DICT_APRILTAG_36h11'
+
+    # Interactive marker size selection
+    if args.size is None and not args.no_interactive:
+        size_input = input("\nEnter marker size in mm [default: 20]: ").strip()
+        if size_input == '':
+            args.size = 0.02  # 20mm
+        else:
+            try:
+                args.size = float(size_input) / 1000.0  # Convert mm to meters
+            except ValueError:
+                print("Invalid size. Using default: 20mm")
+                args.size = 0.02
+    elif args.size is None:
+        args.size = 0.02  # 20mm default
+
+    print(f"\nSelected configuration:")
+    print(f"  Dictionary: {args.dict}")
+    print(f"  Marker size: {args.size * 1000:.1f}mm")
+    print(f"  Debug mode: {args.debug}")
+    print()
+
     # Create detector instance
-    # You can change DICT_4X4_50 to other types like DICT_5X5_100, DICT_6X6_250, etc.
     detector = D435ArUcoDetector(
         calibration_file='ds435_calibration_data.json',
-        aruco_dict_type=aruco.DICT_4X4_50,
-        marker_size=0.02  # 20cm marker size (adjust to your actual marker size)
+        aruco_dict_type=dict_mapping[args.dict],
+        marker_size=args.size
     )
 
     try:
         # Start camera
         detector.start()
 
-        print("\nArUco Marker Detection:")
-        print(f"  Dictionary: DICT_4X4_50")
-        print(f"  Marker Size: {detector.marker_size * 100}cm")
+        marker_type = "AprilTag" if detector.is_apriltag else "ArUco"
+        print(f"\n{marker_type} Marker Detection:")
+        print(f"  Dictionary: {args.dict}")
+        print(f"  Marker Size: {detector.marker_size * 1000}mm")
+        print(f"  Debug Mode: {args.debug}")
         print("\nControls:")
         print("  Press 'q' or ESC to quit")
+        print("  Press 'd' to toggle debug mode")
+        print("\nTip: Use --dict to change marker type")
+        print("  AprilTag: DICT_APRILTAG_36h11, DICT_APRILTAG_16h5, etc.")
+        print("  ArUco: DICT_6X6_250, DICT_4X4_50, etc.")
 
         marker_count = 0
+        debug_mode = args.debug
 
         while True:
             # Get frame
@@ -315,7 +500,7 @@ def main():
                 continue
 
             # Detect markers
-            corners, ids, rejected = detector.detect_markers(image)
+            corners, ids, rejected = detector.detect_markers(image, debug=debug_mode)
 
             # Estimate pose if markers detected
             rvecs, tvecs = None, None
@@ -328,17 +513,31 @@ def main():
             # Draw detections
             output_image = detector.draw_detections(image, corners, ids, rvecs, tvecs)
 
-            # Add status text
-            status_text = f"Markers Detected: {marker_count}"
+            # Add status text with marker type
+            marker_type = "AprilTag" if detector.is_apriltag else "ArUco"
+            status_text = f"{marker_type} Detected: {marker_count} | {args.dict}"
             cv2.putText(
                 output_image,
                 status_text,
                 (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
+                0.6,
                 (0, 255, 0) if marker_count > 0 else (0, 0, 255),
                 2
             )
+
+            # Add rejected candidates count
+            if rejected is not None:
+                rejected_text = f"Rejected: {len(rejected)}"
+                cv2.putText(
+                    output_image,
+                    rejected_text,
+                    (10, 60),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5,
+                    (0, 165, 255),
+                    1
+                )
 
             # Display
             cv2.imshow('D435 ArUco Marker Detection', output_image)
@@ -346,19 +545,30 @@ def main():
             # Handle key press
             key = cv2.waitKey(1) & 0xFF
 
+            # Toggle debug mode
+            if key == ord('d'):
+                debug_mode = not debug_mode
+                print(f"Debug mode: {'ON' if debug_mode else 'OFF'}")
+
             # Quit
             if key == ord('q') or key == 27:  # 27 is ESC
                 break
 
+    except KeyboardInterrupt:
+        print("\n\nInterrupted by user (Ctrl+C)")
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"\nError: {e}")
         import traceback
         traceback.print_exc()
-
     finally:
         # Cleanup
-        detector.stop()
+        print("Cleaning up...")
+        try:
+            detector.stop()
+        except:
+            pass
         cv2.destroyAllWindows()
+        print("Done.")
 
 
 if __name__ == "__main__":
